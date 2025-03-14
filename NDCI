@@ -1,3 +1,5 @@
+// NDCI Script for Laguna Lake by James Silao
+// adapted from Jeremy Kravitz & Mark Matthews (2020)'s CyanoLakes Chlorophyll-a L1C script
 // Water body detection - credit Mohor Gartner
 var MNDWI_threshold=0.42; //testing shows recommended 0.42 for Sentinel-2 and Landsat 8. For the scene in article [1] it was 0.8.
 var NDWI_threshold=0.4; //testing shows recommended 0.4 for Sentinel-2 and Landsat 8. For the scene in article [1] it was 0.5.
