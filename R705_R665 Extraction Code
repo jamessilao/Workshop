@@ -1,0 +1,187 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+import getpass
+
+from sentinelhub import (
+    SHConfig,
+    DataCollection,
+    SentinelHubCatalog,
+    SentinelHubRequest,
+    SentinelHubStatistical,
+    BBox,
+    bbox_to_dimensions,
+    CRS,
+    MimeType,
+    Geometry,
+)
+
+from utils import plot_image
+
+config = SHConfig()
+config.sh_client_id = getpass.getpass("Enter your SentinelHub client id")
+config.sh_client_secret = getpass.getpass("Enter your SentinelHub client secret")
+config.sh_token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+config.sh_base_url = "https://sh.dataspace.copernicus.eu"
+config.save("cdse")
+
+aoi_coords_wgs84 = [121.017838,14.169200,121.489563,14.548361]
+
+resolution = 10
+aoi_bbox = BBox(bbox=aoi_coords_wgs84, crs=CRS.WGS84)
+aoi_size = bbox_to_dimensions(aoi_bbox, resolution=resolution)
+
+print(f"Image shape at {resolution} m resolution: {aoi_size} pixels")
+
+catalog = SentinelHubCatalog(config=config)
+
+aoi_bbox = BBox(bbox=aoi_coords_wgs84, crs=CRS.WGS84)
+time_interval = "2016-01-01", "2016-12-31"
+
+search_iterator = catalog.search(
+    DataCollection.SENTINEL2_L2A,
+    bbox=aoi_bbox,
+    time=time_interval,
+    fields={"include": ["id", "properties.datetime"], "exclude": []},
+)
+
+results = list(search_iterator)
+print("Total number of results:", len(results))
+
+results
+
+evalscript = """
+function setup() {
+  return {
+    input: [{
+      bands: [
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B08",
+        "dataMask"
+      ]
+    }],
+    output: [
+      {
+        id: "pci",
+        bands: 1
+      },
+      {
+        id: "dataMask",
+        bands: 1
+      }]
+  };
+}
+
+function evaluatePixel(samples) {
+    // Calculate pc
+    var pci = (samples.B05 / samples.B04);
+    
+    // Calculate CI
+    var ci = (samples.B08 / samples.B03) - 1;
+
+    // Calculate EVI
+    var evi = 2.5 * (samples.B08 - samples.B04) / ((samples.B08 + 6.0 * samples.B04 - 7.5 * samples.B02) + 1.0);
+    
+    // Calculate NDVI
+    var ndvi = index(samples.B08, samples.B04);
+
+    // Calculate SAVI
+    var savi = (samples.B08 - samples.B04) / (samples.B08 + samples.B04 + 0.5) * (1.0 + 0.5);
+
+    // Calculate DVI
+    var dvi = (samples.B08 - samples.B03);
+
+    // Replace NDCI with NaN if CI > 0 or EVI > 0.66 or NDVI > 0.39
+    if (ci> 0 || evi > 0.66 || ndvi > 0.39 || savi > 0.49 || dvi > 0.50) {
+        pci = NaN;
+    }
+
+    return {
+        pci: [pci],
+        dataMask: [samples.dataMask],
+    };
+}
+
+"""
+
+field1 = {
+    "type": "Polygon",
+    "coordinates": [
+        [
+  [121.138475, 14.487877], [121.139401, 14.488326], [121.139401, 14.487877], [121.138475, 14.488775]
+        ]
+    ],
+}
+
+geometry = Geometry(geometry=field1, crs=CRS.WGS84)
+
+request = SentinelHubStatistical(
+    aggregation=SentinelHubStatistical.aggregation(
+        evalscript=evalscript,
+        time_interval=("2023-07-01T00:00:00Z", "2024-07-30T23:59:59Z"),
+        aggregation_interval="P5D",
+        size=[10, 10],
+    ),
+    input_data=[
+        SentinelHubStatistical.input_data(
+            DataCollection.SENTINEL2_L2A.define_from(
+                name="s2l2a", service_url="https://sh.dataspace.copernicus.eu"
+            ),
+            other_args={"dataFilter": {"maxCloudCoverage": 30}},
+        ),
+    ],
+    geometry=geometry,
+    config=config,
+)
+
+response1 = request.get_data()
+response1
+
+def extract_stats(date, stat_data):
+    d = {}
+    for key, value in stat_data["outputs"].items():
+        stats = value["bands"]["B0"]["stats"]
+        if stats["sampleCount"] == stats["noDataCount"]:
+            continue
+        else:
+            d["date"] = [date]
+            for stat_name, stat_value in stats.items():
+                if stat_name == "sampleCount" or stat_name == "noDataCount":
+                    continue
+                else:
+                    d[f"{key}_{stat_name}"] = [stat_value]
+    return pd.DataFrame(d)
+
+
+def read_acquisitions_stats(stat_data):
+    df_li = []
+    for aq in stat_data:
+        date = aq["interval"]["from"][:10]
+        df_li.append(extract_stats(date, aq))
+    return pd.concat(df_li)
+
+result_df1 = read_acquisitions_stats(response1[0]["data"])
+result_df1
+
+fig_stat, ax_stat = plt.subplots(1, 1, figsize=(12, 6))
+t1 = result_df1["date"]
+pci_mean_field1 = result_df1["pci_mean"]
+pci_std_field1 = result_df1["pci_stDev"]
+ax_stat.plot(t1, pci_mean_field1, label="PCI mean")
+ax_stat.fill_between(
+    t1,
+    pci_mean_field1 - pci_std_field1,
+    pci_mean_field1 + pci_std_field1,
+    alpha=0.3,
+    label="PCI stDev",
+)
+ax_stat.tick_params(axis="x", labelrotation=30, labelsize=12)
+ax_stat.tick_params(axis="y", labelsize=12)
+ax_stat.set_xlabel("Date", size=15)
+ax_stat.set_ylabel("PCI/unitless", size=15)
+ax_stat.legend(loc="lower right", prop={"size": 12})
+ax_stat.set_title("PCI time series", fontsize=20)
+for label in ax_stat.get_xticklabels()[1::2]:
+    label.set_visible(False)
